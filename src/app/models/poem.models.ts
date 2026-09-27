@@ -17,6 +17,18 @@ export interface PoemVersion {
   text: string;
   marks: Record<string, CharacterMark>;
   antithesisPairs: AntithesisPair[];
+  adoptions: AdoptionRecord[];
+}
+
+export interface AdoptionRecord {
+  id: string;
+  /** 在去掉换行后的文本中的字符序号，与并排比较的字符位置一致 */
+  index: number;
+  from: string;
+  to: string;
+  baselineId: string;
+  baselineName: string;
+  adoptedAt: string;
 }
 
 export interface AntithesisPair {

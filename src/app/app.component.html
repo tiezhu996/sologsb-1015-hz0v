@@ -253,6 +253,7 @@
           <button nz-button (click)="store.previousDifference()">上一处异文</button>
           <button nz-button nzType="primary" (click)="store.nextDifference()">下一处异文</button>
           <nz-tag nzColor="error">{{ store.differences().length }} 处差异</nz-tag>
+          <nz-tag nzColor="success">{{ store.adoptions().length }} 处已采纳</nz-tag>
         </div>
         @if (store.baselineVersion(); as baseline) {
           <div class="compare-headings">
@@ -261,20 +262,59 @@
           </div>
           <div class="compare-text">
             @for (item of store.diff(); track item.index) {
-              <span
-                class="diff-char"
-                [class.is-changed]="item.changed"
-                [class.is-current]="item.index === store.currentDiffIndex()"
-                [class.has-left]="!item.left"
-                [class.has-right]="!item.right"
-              >
-                <i>{{ item.left || '□' }}</i>
-                <b>{{ item.right || '□' }}</b>
-              </span>
+              @if (item.changed && item.left) {
+                <button
+                  type="button"
+                  class="diff-char is-changed is-adoptable"
+                  [class.is-current]="item.index === store.currentDiffIndex()"
+                  nz-tooltip
+                  [nzTooltipTitle]="'采纳底本用字「' + item.left + '」'"
+                  (click)="store.adoptBaselineChar(item.index)"
+                >
+                  <i>{{ item.left }}</i>
+                  <b>{{ item.right || '□' }}</b>
+                  <em class="adopt-hint">采</em>
+                </button>
+              } @else {
+                <span
+                  class="diff-char"
+                  [class.is-changed]="item.changed"
+                  [class.is-current]="item.index === store.currentDiffIndex()"
+                  [class.has-left]="!item.left"
+                  [class.has-right]="!item.right"
+                >
+                  <i>{{ item.left || '□' }}</i>
+                  <b>{{ item.right || '□' }}</b>
+                </span>
+              }
+            }
+          </div>
+          <div class="adoption-panel">
+            <div class="adoption-head">
+              <div>
+                <span class="overline">ADOPTIONS</span>
+                <h3>底本采纳记录</h3>
+              </div>
+              <nz-tag nzColor="processing">{{ store.adoptions().length }} 条</nz-tag>
+            </div>
+            @if (store.adoptions().length === 0) {
+              <p class="adoption-empty">尚未采纳底本用字。点击上方标红的差异字格，即可把该字改为底本用字并在此留痕。</p>
+            } @else {
+              <ul class="adoption-list">
+                @for (record of store.adoptions(); track record.id) {
+                  <li class="adoption-row">
+                    <span class="adoption-loc">{{ store.describeAdoption(record) }}</span>
+                    <span class="adoption-change"><s>{{ record.from }}</s><em>→</em><strong>{{ record.to }}</strong></span>
+                    <span class="adoption-source">据底本「{{ record.baselineName }}」</span>
+                    <time>{{ record.adoptedAt | date: 'MM-dd HH:mm' }}</time>
+                    <button nz-button nzSize="small" nzDanger (click)="store.revertAdoption(record.id)">撤销</button>
+                  </li>
+                }
+              </ul>
             }
           </div>
           <div class="compare-note">
-            <nz-alert nzType="info" nzShowIcon nzMessage="比较采用字符位置对齐" nzDescription="上方为上／底本字符，下方为当前版本。点击“下一处异文”可逐项定位。"></nz-alert>
+            <nz-alert nzType="info" nzShowIcon nzMessage="比较采用字符位置对齐" nzDescription="上方为底本字符，下方为当前版本。点击标红的差异字格可直接采纳底本用字，差异数随之减少；每处采纳都会在“底本采纳记录”中注明来源，可逐条撤销。"></nz-alert>
           </div>
         } @else {
           <nz-empty nzNotFoundContent="请选择一份异文底本"></nz-empty>

@@ -1,5 +1,6 @@
 import { computed, Injectable, signal } from '@angular/core';
 import type {
+  AdoptionRecord,
   AntithesisPair,
   AnalysisCell,
   AnalysisLine,
@@ -72,6 +73,39 @@ function defaultMark(): CharacterMark {
   return { tone: '?', rhyme: '', pauseAfter: false, basis: '', note: '' };
 }
 
+/** 去掉换行后的字符序列，与并排比较的字符位置一一对应 */
+function flatChars(text: string): string[] {
+  return Array.from(text.replace(/\n/g, ''));
+}
+
+/** 把正文中第 flatIndex 个非换行字符替换为 char，返回替换前的字 */
+function replaceFlatChar(text: string, flatIndex: number, char: string): { text: string; previous: string } | null {
+  const chars = Array.from(text);
+  let seen = -1;
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] === '\n') continue;
+    seen += 1;
+    if (seen === flatIndex) {
+      const previous = chars[i];
+      chars[i] = char;
+      return { text: chars.join(''), previous };
+    }
+  }
+  return null;
+}
+
+/** 把扁平字符序号换算成「第几句第几字」，供采纳记录展示 */
+function describeFlatIndex(text: string, flatIndex: number): string {
+  const lines = text.split('\n');
+  let offset = 0;
+  for (let line = 0; line < lines.length; line++) {
+    const length = Array.from(lines[line]).length;
+    if (flatIndex < offset + length) return `第 ${line + 1} 句第 ${flatIndex - offset + 1} 字`;
+    offset += length;
+  }
+  return `第 ${flatIndex + 1} 字`;
+}
+
 function initialWorkspace(): PoemWorkspace {
   const now = new Date().toISOString();
   const spring = '春眠不觉晓，\n处处闻啼鸟。\n夜来风雨声，\n花落知多少。';
@@ -95,6 +129,7 @@ function initialWorkspace(): PoemWorkspace {
     text: variants,
     marks,
     antithesisPairs: [],
+    adoptions: [],
   };
   const variant: PoemVersion = {
     id: 'version-song',
@@ -104,6 +139,7 @@ function initialWorkspace(): PoemWorkspace {
     text: '春眠不觉晓，\n处处闻啼鸟。\n夜来风雨声，\n花落知多少。',
     marks: clone(marks),
     antithesisPairs: [],
+    adoptions: [],
   };
   return {
     title: '春晓',
@@ -120,7 +156,11 @@ function loadWorkspace(): PoemWorkspace {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return initialWorkspace();
     const parsed = JSON.parse(raw) as PoemWorkspace;
-    return parsed.versions?.length ? parsed : initialWorkspace();
+    if (!parsed.versions?.length) return initialWorkspace();
+    parsed.versions.forEach((version) => {
+      version.adoptions = version.adoptions ?? [];
+    });
+    return parsed;
   } catch {
     return initialWorkspace();
   }
@@ -252,6 +292,7 @@ export class PoetryStoreService {
 
   readonly differences = computed(() => this.diff().filter((item) => item.changed).map((item) => item.index));
   readonly baselineVersion = computed(() => this.workspace().versions.find((version) => version.id === this.baselineVersionId()));
+  readonly adoptions = computed(() => this.activeVersion().adoptions ?? []);
 
   selectVersion(id: string): void {
     this.workspace.update((workspace) => ({ ...workspace, activeVersionId: id }));
@@ -368,6 +409,52 @@ export class PoetryStoreService {
     this.currentDiffIndex.set(reverse[(current + 1) % reverse.length]);
   }
 
+  /** 在并排比较中采纳底本在某一位置的用字，正文同步改写并留下来源记录 */
+  adoptBaselineChar(flatIndex: number): void {
+    const baseline = this.baselineVersion();
+    const active = this.activeVersion();
+    if (!baseline || baseline.id === active.id) return;
+    const target = flatChars(baseline.text)[flatIndex];
+    if (!target || flatChars(active.text)[flatIndex] === target) return;
+    this.commit((workspace) => {
+      const version = this.versionIn(workspace);
+      const replaced = replaceFlatChar(version.text, flatIndex, target);
+      if (!replaced) return;
+      version.text = replaced.text;
+      version.adoptions = [
+        ...version.adoptions.filter((record) => record.index !== flatIndex),
+        {
+          id: uid('adopt'),
+          index: flatIndex,
+          from: replaced.previous,
+          to: target,
+          baselineId: baseline.id,
+          baselineName: baseline.name,
+          adoptedAt: new Date().toISOString(),
+        },
+      ];
+    });
+    this.toast.set(`已按底本「${baseline.name}」采纳“${target}”`);
+  }
+
+  /** 撤销某一条采纳，把该位置改回采纳前的用字 */
+  revertAdoption(id: string): void {
+    const record = this.adoptions().find((item) => item.id === id);
+    if (!record) return;
+    if (flatChars(this.activeVersion().text)[record.index] !== record.to) return;
+    this.commit((workspace) => {
+      const version = this.versionIn(workspace);
+      const replaced = replaceFlatChar(version.text, record.index, record.from);
+      if (replaced) version.text = replaced.text;
+      version.adoptions = version.adoptions.filter((item) => item.id !== id);
+    });
+    this.toast.set(`已撤销采纳，恢复为“${record.from}”`);
+  }
+
+  describeAdoption(record: AdoptionRecord): string {
+    return describeFlatIndex(this.activeVersion().text, record.index);
+  }
+
   undo(): void {
     const previous = this.undoStack.pop();
     if (!previous) return;
@@ -395,7 +482,25 @@ export class PoetryStoreService {
       return `第 ${line.index + 1} 句：${tags}`;
     });
     const notes = this.issues().map((issue) => `[${issue.level.toUpperCase()}] ${issue.title}：${issue.detail}`);
-    return [`# ${this.workspace().title} · 格律校对稿`, '', `底本：${active.name}`, `出处：${active.source}`, '', '## 字音标注', ...lines, '', '## 检查记录', ...notes].join('\n');
+    const adoptions = this.adoptions().map(
+      (record) =>
+        `- ${this.describeAdoption(record)}：“${record.from}”改从“${record.to}”，据底本「${record.baselineName}」采纳（${record.adoptedAt.slice(0, 16).replace('T', ' ')}）`,
+    );
+    return [
+      `# ${this.workspace().title} · 格律校对稿`,
+      '',
+      `底本：${active.name}`,
+      `出处：${active.source}`,
+      '',
+      '## 字音标注',
+      ...lines,
+      '',
+      '## 底本采纳记录',
+      ...(adoptions.length ? adoptions : ['本次校勘未采纳底本用字。']),
+      '',
+      '## 检查记录',
+      ...notes,
+    ].join('\n');
   }
 
   downloadProofreadCopy(): void {
@@ -416,11 +521,21 @@ export class PoetryStoreService {
     this.redoStack = [];
     const next = clone(this.workspace());
     mutator(next);
+    this.pruneStaleAdoptions(next);
     next.updatedAt = new Date().toISOString();
     this.workspace.set(next);
     this.undoCount.set(this.undoStack.length);
     this.redoCount.set(0);
     this.persist();
+  }
+
+  /** 正文被改动后，丢掉那些位置上已经不是所采纳之字的记录 */
+  private pruneStaleAdoptions(workspace: PoemWorkspace): void {
+    workspace.versions.forEach((version) => {
+      if (!version.adoptions?.length) return;
+      const chars = flatChars(version.text);
+      version.adoptions = version.adoptions.filter((record) => chars[record.index] === record.to);
+    });
   }
 
   private versionIn(workspace: PoemWorkspace): PoemVersion {
