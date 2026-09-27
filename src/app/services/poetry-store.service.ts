@@ -1,5 +1,6 @@
 import { computed, Injectable, signal } from '@angular/core';
 import type {
+  AdoptionRecord,
   AntithesisPair,
   AnalysisCell,
   AnalysisLine,
@@ -72,6 +73,35 @@ function defaultMark(): CharacterMark {
   return { tone: '?', rhyme: '', pauseAfter: false, basis: '', note: '' };
 }
 
+function flattenedChars(text: string): string[] {
+  return Array.from(text.replace(/\n/g, ''));
+}
+
+function replaceFlattenedChar(text: string, flatIndex: number, char: string): string {
+  let cursor = -1;
+  return Array.from(text, (current) => {
+    if (current === '\n') return current;
+    cursor += 1;
+    return cursor === flatIndex ? char : current;
+  }).join('');
+}
+
+function pruneAdoptions(records: AdoptionRecord[], text: string): AdoptionRecord[] {
+  const chars = flattenedChars(text);
+  return records.filter((record) => chars[record.index] === record.adopted);
+}
+
+function locateFlatIndex(text: string, flatIndex: number): { line: number; column: number } {
+  let remaining = flatIndex;
+  const lines = text.split('\n');
+  for (let index = 0; index < lines.length; index += 1) {
+    const length = Array.from(lines[index]).length;
+    if (remaining < length) return { line: index + 1, column: remaining + 1 };
+    remaining -= length;
+  }
+  return { line: lines.length, column: remaining + 1 };
+}
+
 function initialWorkspace(): PoemWorkspace {
   const now = new Date().toISOString();
   const spring = '春眠不觉晓，\n处处闻啼鸟。\n夜来风雨声，\n花落知多少。';
@@ -95,6 +125,7 @@ function initialWorkspace(): PoemWorkspace {
     text: variants,
     marks,
     antithesisPairs: [],
+    adoptions: [],
   };
   const variant: PoemVersion = {
     id: 'version-song',
@@ -104,6 +135,7 @@ function initialWorkspace(): PoemWorkspace {
     text: '春眠不觉晓，\n处处闻啼鸟。\n夜来风雨声，\n花落知多少。',
     marks: clone(marks),
     antithesisPairs: [],
+    adoptions: [],
   };
   return {
     title: '春晓',
@@ -120,7 +152,11 @@ function loadWorkspace(): PoemWorkspace {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return initialWorkspace();
     const parsed = JSON.parse(raw) as PoemWorkspace;
-    return parsed.versions?.length ? parsed : initialWorkspace();
+    if (!parsed.versions?.length) return initialWorkspace();
+    parsed.versions.forEach((version) => {
+      version.adoptions = version.adoptions ?? [];
+    });
+    return parsed;
   } catch {
     return initialWorkspace();
   }
@@ -239,8 +275,8 @@ export class PoetryStoreService {
     const left = this.workspace().versions.find((version) => version.id === this.baselineVersionId());
     const right = this.activeVersion();
     if (!left || left.id === right.id) return [];
-    const leftChars = Array.from(left.text.replace(/\n/g, ''));
-    const rightChars = Array.from(right.text.replace(/\n/g, ''));
+    const leftChars = flattenedChars(left.text);
+    const rightChars = flattenedChars(right.text);
     const size = Math.max(leftChars.length, rightChars.length);
     return Array.from({ length: size }, (_, index) => ({
       index,
@@ -252,6 +288,7 @@ export class PoetryStoreService {
 
   readonly differences = computed(() => this.diff().filter((item) => item.changed).map((item) => item.index));
   readonly baselineVersion = computed(() => this.workspace().versions.find((version) => version.id === this.baselineVersionId()));
+  readonly activeAdoptions = computed(() => this.activeVersion().adoptions ?? []);
 
   selectVersion(id: string): void {
     this.workspace.update((workspace) => ({ ...workspace, activeVersionId: id }));
@@ -353,6 +390,49 @@ export class PoetryStoreService {
     this.baselineVersionId.set(this.activeVersion().id);
   }
 
+  adoptBaselineChar(index: number): void {
+    const baseline = this.baselineVersion();
+    const active = this.activeVersion();
+    if (!baseline || baseline.id === active.id) return;
+    const adopted = flattenedChars(baseline.text)[index];
+    const previous = flattenedChars(active.text)[index];
+    if (!adopted || previous === undefined || previous === adopted) return;
+    this.commit((workspace) => {
+      const version = this.versionIn(workspace);
+      version.text = replaceFlattenedChar(version.text, index, adopted);
+      version.adoptions = [
+        ...(version.adoptions ?? []),
+        {
+          id: uid('adopt'),
+          index,
+          previous,
+          adopted,
+          baselineId: baseline.id,
+          baselineName: baseline.name,
+          adoptedAt: new Date().toISOString(),
+        },
+      ];
+    });
+    this.toast.set(`已采纳底本「${adopted}」（${baseline.name}）`);
+  }
+
+  undoAdoption(id: string): void {
+    const record = (this.activeVersion().adoptions ?? []).find((item) => item.id === id);
+    if (!record) return;
+    if (flattenedChars(this.activeVersion().text)[record.index] !== record.adopted) return;
+    this.commit((workspace) => {
+      const version = this.versionIn(workspace);
+      version.text = replaceFlattenedChar(version.text, record.index, record.previous);
+      version.adoptions = (version.adoptions ?? []).filter((item) => item.id !== id);
+    });
+    this.toast.set(`已撤销采纳，恢复为「${record.previous}」`);
+  }
+
+  adoptionLocation(index: number): string {
+    const location = locateFlatIndex(this.activeVersion().text, index);
+    return `第 ${location.line} 句第 ${location.column} 字`;
+  }
+
   nextDifference(): void {
     const values = this.differences();
     if (!values.length) return;
@@ -394,8 +474,27 @@ export class PoetryStoreService {
       const tags = line.cells.map((cell) => `${cell.char}${cell.actual === '?' ? '□' : `(${cell.actual})`}`).join(' ');
       return `第 ${line.index + 1} 句：${tags}`;
     });
+    const adoptions = (active.adoptions ?? []).map((record) => {
+      const location = locateFlatIndex(active.text, record.index);
+      const time = record.adoptedAt.slice(0, 16).replace('T', ' ');
+      return `- 第 ${location.line} 句第 ${location.column} 字：「${record.previous}」→「${record.adopted}」（据 ${record.baselineName}，${time}）`;
+    });
     const notes = this.issues().map((issue) => `[${issue.level.toUpperCase()}] ${issue.title}：${issue.detail}`);
-    return [`# ${this.workspace().title} · 格律校对稿`, '', `底本：${active.name}`, `出处：${active.source}`, '', '## 字音标注', ...lines, '', '## 检查记录', ...notes].join('\n');
+    return [
+      `# ${this.workspace().title} · 格律校对稿`,
+      '',
+      `底本：${active.name}`,
+      `出处：${active.source}`,
+      '',
+      '## 字音标注',
+      ...lines,
+      '',
+      '## 异文采纳记录',
+      ...(adoptions.length ? adoptions : ['- 本次校对未采纳底本异文']),
+      '',
+      '## 检查记录',
+      ...notes,
+    ].join('\n');
   }
 
   downloadProofreadCopy(): void {
@@ -416,6 +515,9 @@ export class PoetryStoreService {
     this.redoStack = [];
     const next = clone(this.workspace());
     mutator(next);
+    next.versions.forEach((version) => {
+      version.adoptions = pruneAdoptions(version.adoptions ?? [], version.text);
+    });
     next.updatedAt = new Date().toISOString();
     this.workspace.set(next);
     this.undoCount.set(this.undoStack.length);

@@ -17,6 +17,17 @@ export interface PoemVersion {
   text: string;
   marks: Record<string, CharacterMark>;
   antithesisPairs: AntithesisPair[];
+  adoptions: AdoptionRecord[];
+}
+
+export interface AdoptionRecord {
+  id: string;
+  index: number;
+  previous: string;
+  adopted: string;
+  baselineId: string;
+  baselineName: string;
+  adoptedAt: string;
 }
 
 export interface AntithesisPair {
